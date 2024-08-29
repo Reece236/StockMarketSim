@@ -23,10 +23,12 @@ class Trader:
 
     def set_stock_valuations(self, stocks):
         for stock in stocks.values():
-            self.stock_valuations[stock.name] = random.uniform(0.8, 1.2)
+            delta_value = np.random.binomial(100, 0.5) / 100
+            stock_valuation = delta_value * stock.risk
+            self.stock_valuations[stock.name] = stock_valuation
 
     def evaluate_stock(self, stock):
-        return stock.price * self.stock_valuations[stock.name]
+        return (stock.price * (1 - stock.risk) + self.stock_valuations[stock.name] * stock.risk) / (1 + stock.risk)
 
     def list_shares_for_sale(self):
         '''
@@ -92,16 +94,58 @@ class Stock:
         self.risk = risk
         self.outstanding_shares = quantity
         self.history = [price]
+        self.last_trade_price = price
 
     def __str__(self):
         return f'{self.name} is priced at ${self.price:.2f}.'
 
-    def update_price(self):
-        demand = random.uniform(0, 1) * self.outstanding_shares
-        supply = random.uniform(0, 1) * self.outstanding_shares
-        price_change = (demand - supply) / self.outstanding_shares
-        self.price = max(0.01, self.price * (1 + price_change))
+    def update_price(self, buy_orders, sell_orders):
+        """
+        Update the stock price based on the matched orders.
+        """
+        total_volume = 0
+        trade_prices = []
+
+        # Sort buy orders by price descending, sell orders by price ascending
+        buy_orders.sort(key=lambda x: -x[3])
+        sell_orders.sort(key=lambda x: x[3])
+
+        while buy_orders and sell_orders:
+            buy_order = buy_orders[0]
+            sell_order = sell_orders[0]
+
+            # If buy price is greater than or equal to sell price, execute trade
+            if buy_order[3] >= sell_order[3]:
+                trade_price = (buy_order[3] + sell_order[3]) / 2
+                quantity = min(buy_order[2], sell_order[2])
+
+                # Track the trade prices and volumes
+                trade_prices.append((trade_price, quantity))
+                total_volume += quantity
+
+                # Update the orders after trade execution
+                buy_order[2] -= quantity
+                sell_order[2] -= quantity
+
+                if buy_order[2] == 0:
+                    buy_orders.pop(0)
+                if sell_order[2] == 0:
+                    sell_orders.pop(0)
+
+            else:
+                break
+
+        # Determine new price based on the volume-weighted average of trade prices
+        if trade_prices:
+            volume_weighted_price = sum(price * vol for price, vol in trade_prices) / total_volume
+            self.price = volume_weighted_price
+            self.last_trade_price = volume_weighted_price
+        else:
+            # No trades occurred, adjust price slightly towards last trade price
+            self.price = self.price * (1 + random.uniform(-0.01, 0.01))
+
         self.history.append(self.price)
+
 
 class Option:
     def __init__(self, option_type, stock, strike_price, expiry_date):
@@ -128,53 +172,25 @@ class StockMarket:
     order_book = {'buy': [], 'sell': []}
 
     @staticmethod
-    def open_market():
-        StockMarket.market_open = True
-        print('Market is now open.')
-
-    @staticmethod
-    def close_market():
-        StockMarket.market_open = False
-        print('Market is now closed.')
-
-    @staticmethod
-    def add_stock(stock):
-        StockMarket.stocks[stock.name] = stock
-
-    @staticmethod
-    def get_stock(stock_name):
-        return StockMarket.stocks.get(stock_name)
-
-    @staticmethod
     def match_orders():
-        '''
+        """
         Match buy and sell orders from the order book.
-        '''
-        StockMarket.order_book['buy'].sort(key=lambda x: -x[3])  # Sort buy orders by price descending
-        StockMarket.order_book['sell'].sort(key=lambda x: x[3])  # Sort sell orders by price ascending
+        """
+        # Reset each stock's order book
+        stock_order_books = {stock.name: {'buy': [], 'sell': []} for stock in StockMarket.stocks.values()}
 
-        while StockMarket.order_book['buy'] and StockMarket.order_book['sell']:
-            buy_order = StockMarket.order_book['buy'][0]
-            sell_order = StockMarket.order_book['sell'][0]
+        # Distribute orders into individual stock order books
+        for buy_order in StockMarket.order_book['buy']:
+            stock_order_books[buy_order[1]]['buy'].append(buy_order)
 
-            if buy_order[3] >= sell_order[3]:  # Match found
-                transaction_price = (buy_order[3] + sell_order[3]) / 2
-                quantity = min(buy_order[2], sell_order[2])
+        for sell_order in StockMarket.order_book['sell']:
+            stock_order_books[sell_order[1]]['sell'].append(sell_order)
 
-                # Execute the trade
-                buy_order[0].execute_trade('buy', buy_order[1], quantity, transaction_price)
-                sell_order[0].execute_trade('sell', sell_order[1], quantity, transaction_price)
-
-                # Adjust or remove orders from order book
-                buy_order[2] -= quantity
-                sell_order[2] -= quantity
-
-                if buy_order[2] == 0:
-                    StockMarket.order_book['buy'].pop(0)
-                if sell_order[2] == 0:
-                    StockMarket.order_book['sell'].pop(0)
-            else:
-                break
+        # Process each stock's order book
+        for stock_name, orders in stock_order_books.items():
+            stock = StockMarket.get_stock(stock_name)
+            if stock:
+                stock.update_price(orders['buy'], orders['sell'])
 
     @staticmethod
     def simulate_trading_day(traders):
@@ -194,9 +210,6 @@ class StockMarket:
                 StockMarket.order_book['buy'].append((trader, *bid_order))
 
         StockMarket.match_orders()
-
-        for stock in StockMarket.stocks.values():
-            stock.update_price()
 
     @staticmethod
     def simulate_year(traders, days=252):
@@ -289,7 +302,7 @@ def plot_risk_return(traders):
 sectors = ['Tech', 'Health', 'Finance', 'Energy', 'Retail']
 for i in range(100):
     name = f'Stock_{i+1}'
-    price = random.uniform(10, 500)
+    price = np.random.lognormal(.72, 1.08) * 75
     quantity = random.randint(1000, 10000)
     sector = random.choice(sectors)
     risk = random.uniform(0.1, 0.9)
